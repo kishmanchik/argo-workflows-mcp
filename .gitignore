@@ -1,0 +1,3 @@
+/argo-workflows-mcp
+*.test
+.DS_Store
