@@ -15,7 +15,7 @@ var k8sNameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 // ever reaches a kubectl argv slot.
 func ValidateNamespace(ns string) error {
 	if !k8sNameRe.MatchString(ns) {
-		return fmt.Errorf("invalid namespace %q: must be a bare lowercase RFC1123 label", ns)
+		return fmt.Errorf("invalid namespace %q: must be a bare lowercase RFC1123 label: %w", ns, ErrInvalidInput)
 	}
 	return nil
 }
@@ -23,7 +23,7 @@ func ValidateNamespace(ns string) error {
 // ValidateWorkflowName rejects anything that isn't a bare RFC1123 label.
 func ValidateWorkflowName(name string) error {
 	if !k8sNameRe.MatchString(name) {
-		return fmt.Errorf("invalid workflow name %q: must be a bare lowercase RFC1123 label", name)
+		return fmt.Errorf("invalid workflow name %q: must be a bare lowercase RFC1123 label: %w", name, ErrInvalidInput)
 	}
 	return nil
 }
@@ -43,7 +43,7 @@ var allowedPhases = map[string]bool{
 // enum, so it can never carry an injected flag either.
 func ValidatePhase(phase string) error {
 	if !allowedPhases[phase] {
-		return fmt.Errorf("invalid phase %q: must be one of Pending/Running/Succeeded/Failed/Error", phase)
+		return fmt.Errorf("invalid phase %q: must be one of Pending/Running/Succeeded/Failed/Error: %w", phase, ErrInvalidInput)
 	}
 	return nil
 }
@@ -55,7 +55,7 @@ func ValidateTail(n int) (int, error) {
 		return 50, nil // default
 	}
 	if n > 500 {
-		return 0, fmt.Errorf("tail %d exceeds the maximum of 500 lines", n)
+		return 0, fmt.Errorf("tail %d exceeds the maximum of 500 lines: %w", n, ErrInvalidInput)
 	}
 	return n, nil
 }

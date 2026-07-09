@@ -31,6 +31,21 @@ MCP client over-prompt for confirmation — `mcp/tools.go`'s `readTool()` helper
 `TestReadTools_AnnotateAsReadOnly`. Verified end-to-end with a live `tools/list` call, not just
 unit tests.
 
+Two more practices adopted from surveying other mature MCP servers (kept intentionally generic —
+none of this is tied to a specific one):
+
+- **Categorized errors, not bare Go error strings.** `internal/errors.go`'s `ClassifyError` maps
+  any error onto a small stable set (`invalid_input`, `not_found`, `timeout`, `unavailable`,
+  `other`); `mcp/tools.go` prefixes every error result with `[category]` via `FormatToolError`,
+  so the model gets a consistent, inspectable shape instead of guessing from prose. Tested by
+  `internal/errors_test.go` and, end-to-end through the actual handlers, `mcp/handlers_test.go`.
+- **Untrusted-data framing on every successful result.** `mcp/tools.go` wraps all cluster-sourced
+  content (workflow status messages, pod logs) in `<untrusted_cluster_data>` delimiters — the
+  same principle `hxdr mcp`'s own design doc states ("tool output is framed to the model as
+  untrusted data, never instructions") but as an explicit, testable wrapper here. Defense in
+  depth on top of `Redact`, not a substitute for it. Tested by
+  `TestListWorkflows_SuccessIsWrappedAsUntrustedData`.
+
 ## Tool catalog (closed allowlist — 4 tools, all read-only)
 
 | Tool | kubectl verb | Purpose |
@@ -44,7 +59,7 @@ unit tests.
 
 ```bash
 go build ./...
-go test ./...            # 21 tests: validate, redact, inspect (canned kubectl JSON), tool catalog
+go test ./...            # 27 tests: validate, redact, errors, inspect, handlers, tool catalog
 go build -o argo-workflows-mcp .
 ```
 
