@@ -121,6 +121,19 @@ func TestWorkflowLogs_UsesWorkflowLabelSelector(t *testing.T) {
 	}
 }
 
+func TestWorkflowLogs_EmptyIsDegradedNotCleanSuccess(t *testing.T) {
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		return []byte{}, nil
+	})
+	out, err := WorkflowLogs("dev1", "wf-b", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(out, DegradedPrefix) {
+		t.Errorf("expected empty logs to be marked degraded, got: %q", out)
+	}
+}
+
 func TestWorkflowLogs_RedactsSecrets(t *testing.T) {
 	withKubectl(t, func(args ...string) ([]byte, error) {
 		return []byte("connecting with AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"), nil
@@ -160,6 +173,27 @@ func TestDiagnose_SkipsSucceededOnlySurfacesUnhealthy(t *testing.T) {
 	}
 	if !strings.Contains(out, "wf-broken") || !strings.Contains(out, "step-one") {
 		t.Errorf("expected broken workflow + failed step detail, got: %q", out)
+	}
+}
+
+func TestDiagnose_FailedWithoutMatchingNodeIsDegraded(t *testing.T) {
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		items := []workflowItem{
+			mkItem("wf-mystery", "Failed", "1/3", "2026-07-02T00:00:00Z"),
+		}
+		// No Failed/Error entry in Nodes at all — status.nodes doesn't
+		// corroborate the top-level Failed phase.
+		items[0].Status.Nodes = map[string]workflowNode{
+			"n1": {DisplayName: "step-one", TemplateName: "build", Phase: "Succeeded"},
+		}
+		return canned(items), nil
+	})
+	out, err := Diagnose("dev1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, DegradedPrefix) {
+		t.Errorf("expected a degraded marker when no node corroborates the Failed phase, got: %q", out)
 	}
 }
 

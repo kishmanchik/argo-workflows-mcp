@@ -73,10 +73,31 @@ type registeredTool struct {
 	handler server.ToolHandlerFunc
 }
 
+// audited wraps a handler so every invocation is recorded via
+// internal.AuditLog before it runs — name and (redacted) arguments, so there's
+// a record of what was called even though every tool here is read-only.
+func audited(name string, h server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		internal.AuditLog(name, req.GetArguments())
+		return h(ctx, req)
+	}
+}
+
 // ReadTools is the entire tool surface: four read-only tools over the
 // argoproj.io/v1alpha1 Workflow CRD. Every entry calls straight into
 // internal.* — this package carries no parsing/redaction logic of its own.
 func ReadTools() []registeredTool {
+	tools := readTools()
+	for i := range tools {
+		tools[i].handler = audited(tools[i].name, tools[i].handler)
+	}
+	return tools
+}
+
+// readTools builds the raw, unaudited tool set. Kept separate from ReadTools
+// purely so the audit wrapping above is applied in exactly one place instead
+// of once per handler body.
+func readTools() []registeredTool {
 	return []registeredTool{
 		{
 			name: "list_workflows",

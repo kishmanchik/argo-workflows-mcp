@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os/exec"
@@ -83,6 +84,36 @@ func TestListWorkflows_KubectlUnavailableIsCategorized(t *testing.T) {
 	}
 	if !strings.HasPrefix(text, "[unavailable]") {
 		t.Errorf("expected an [unavailable]-categorized error, got: %q", text)
+	}
+}
+
+func TestCallingATool_WritesAnAuditLine(t *testing.T) {
+	var buf bytes.Buffer
+	orig := internal.AuditWriter
+	internal.AuditWriter = &buf
+	t.Cleanup(func() { internal.AuditWriter = orig })
+
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		return []byte(`{"items":[]}`), nil
+	})
+	callToolText(t, "list_workflows", map[string]any{"namespace": "dev1"})
+
+	got := buf.String()
+	if !strings.Contains(got, "tool=list_workflows") || !strings.Contains(got, "namespace=dev1") {
+		t.Errorf("expected an audit line for the call actually made through the registered handler, got: %q", got)
+	}
+}
+
+func TestWorkflowLogs_EmptyIsDegradedNotAnError(t *testing.T) {
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		return []byte{}, nil
+	})
+	text, isErr := callToolText(t, "workflow_logs", map[string]any{"namespace": "dev1", "name": "wf-b"})
+	if isErr {
+		t.Fatalf("expected a success result (degraded, not an error), got error: %q", text)
+	}
+	if !strings.Contains(text, internal.DegradedPrefix) {
+		t.Errorf("expected the degraded marker to survive into the wrapped result, got: %q", text)
 	}
 }
 

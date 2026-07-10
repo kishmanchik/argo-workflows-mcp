@@ -45,6 +45,34 @@ none of this is tied to a specific one):
   untrusted data, never instructions") but as an explicit, testable wrapper here. Defense in
   depth on top of `Redact`, not a substitute for it. Tested by
   `TestListWorkflows_SuccessIsWrappedAsUntrustedData`.
+- **A degraded status marker, distinct from error/success.** `internal/status.go`'s
+  `Degraded()` marks a confirmed-but-uncertain observation (e.g. empty logs that might mean
+  "never logged" or "pods already GC'd", or a workflow reporting Failed/Error with no matching
+  node in `status.nodes` to corroborate it) — the call succeeded, but the result shouldn't read
+  as confirmed-healthy. Tested by `TestWorkflowLogs_EmptyIsDegradedNotCleanSuccess` and
+  `TestDiagnose_FailedWithoutMatchingNodeIsDegraded`.
+- **Per-call audit logging.** `internal/audit.go`'s `AuditLog` records every tool invocation
+  (timestamp, tool name, redacted arguments) to stderr — cheap, and there was previously zero
+  record of what got called with what. Tested by `internal/audit_test.go` and, end-to-end,
+  `TestCallingATool_WritesAnAuditLine`.
+
+Both of the above were validated, and one real bug was found and fixed, by live-testing against
+a real Argo Workflows install (a disposable local `kind` cluster, then a genuine live QA
+environment): `internal/redact.go`'s catch-all "long opaque blob" pattern was catching real
+workflow/node names. Two contributing causes, both fixed:
+1. `=` was part of the opaque-blob character class (meant for base64 padding), so
+   `workflow=<name>` collapsed into one match — the `=` glued our own `key=value` output
+   formatting into the redaction. Fixed by restricting `=` to trailing padding only (0-2 chars,
+   which is the only place real base64 padding ever appears) — zero loss of real-secret
+   detection, since genuine base64 never has interior `=` anyway.
+2. The 40-char floor was too low: Argo's generated node/pod names (workflow + template +
+   retry/expansion suffixes) routinely exceed 40 chars in real deployments. Raised to 64 — JWTs
+   /AWS keys/GitHub tokens are already caught by their own dedicated patterns above, so this
+   catch-all mainly exists for generic long opaque strings, and 64 gives real identifiers
+   (observed up to ~58 chars live) room to not false-trigger.
+
+Tested by `TestRedact_KeyValueNotGlobbedIntoBlob`, `TestRedact_RealisticArgoNodeNamesSurvive`,
+and `TestRedact_TrailingPaddingOnlyStillCaught` (a real base64 secret is still redacted).
 
 ## Tool catalog (closed allowlist — 4 tools, all read-only)
 
@@ -59,7 +87,7 @@ none of this is tied to a specific one):
 
 ```bash
 go build ./...
-go test ./...            # 27 tests: validate, redact, errors, inspect, handlers, tool catalog
+go test ./...            # 38 tests: validate, redact, errors, status, audit, inspect, handlers, tool catalog
 go build -o argo-workflows-mcp .
 ```
 

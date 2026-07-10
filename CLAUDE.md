@@ -34,6 +34,16 @@ would break the enforcement, stop and reconsider the change, don't delete the te
 6. **Cluster-sourced content is framed to the model as untrusted data, not instructions** — every
    successful tool result is wrapped (`mcp/tools.go`'s `untrustedOpen`/`untrustedClose`).
    Enforced by `TestListWorkflows_SuccessIsWrappedAsUntrustedData`.
+7. **A confirmed-but-uncertain result is marked degraded, never plain success.** Enforced by
+   `TestWorkflowLogs_EmptyIsDegradedNotCleanSuccess` and
+   `TestDiagnose_FailedWithoutMatchingNodeIsDegraded` in `internal/inspect_test.go`.
+8. **Every tool invocation is audit-logged (name + redacted args) to stderr.** Enforced by
+   `TestCallingATool_WritesAnAuditLine` in `mcp/handlers_test.go`.
+9. **The opaque-blob redaction pattern's `=` is trailing-padding-only, never interior** — real
+   base64 padding is always 0-2 trailing chars; an interior `=` used to glob our own
+   `key=value` output formatting into the redaction (found via live-testing against a real
+   cluster). Enforced by `TestRedact_KeyValueNotGlobbedIntoBlob` in `internal/redact_test.go`.
+   Do not add `=` back into the interior character class.
 
 ## Design context
 

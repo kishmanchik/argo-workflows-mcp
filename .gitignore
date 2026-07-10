@@ -1,3 +1,8 @@
 /argo-workflows-mcp
 *.test
 .DS_Store
+
+# Machine-specific: uses an absolute path until this is `go install`-ed onto a
+# well-known PATH dir, at which point it should switch to the bare-command form
+# (see README) and become safe to commit, matching hxdr mcp's own .mcp.json.
+/.mcp.json

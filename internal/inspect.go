@@ -176,7 +176,12 @@ func WorkflowLogs(namespace, name string, tail int) (string, error) {
 		return "", fmt.Errorf("kubectl logs for workflow %s: %w", name, err)
 	}
 	if len(out) == 0 {
-		return fmt.Sprintf("no logs found for workflow %s in namespace %s (pods may already be garbage-collected)", name, namespace), nil
+		// Not a confirmed "no logs ever" — kubectl succeeded, but empty could
+		// equally mean the pods (and their logs) are already garbage-collected,
+		// or the label selector matched nothing due to a naming mismatch.
+		// Degraded, not a clean success, so a caller doesn't read this as
+		// confirmed-quiet.
+		return Degraded(fmt.Sprintf("no logs found for workflow %s in namespace %s (pods may already be garbage-collected)", name, namespace)), nil
 	}
 	return Redact(string(out)), nil
 }
@@ -209,6 +214,12 @@ func Diagnose(namespace string) (string, error) {
 			if node := firstFailedNode(it.Status.Nodes); node != nil {
 				fmt.Fprintf(&sb, "  first failed step: %s (template=%s) — %s\n",
 					orUnknown(node.DisplayName), orUnknown(node.TemplateName), node.Message)
+			} else {
+				// The workflow itself reports Failed/Error, but nothing in
+				// status.nodes corroborates it — status.nodes may be stale,
+				// truncated, or not yet populated. Don't imply we identified a
+				// culprit step when we didn't.
+				fmt.Fprintf(&sb, "  %s\n", Degraded("workflow reports "+it.Status.Phase+" but no matching Failed/Error node was found in status.nodes"))
 			}
 		}
 	}
