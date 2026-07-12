@@ -23,6 +23,36 @@ type workflowNode struct {
 	Type         string `json:"type"`
 }
 
+// condition is the subset of a Workflow's status.conditions entry we care
+// about — e.g. a SpecWarning/SpecError can be true on a workflow whose phase
+// otherwise looks healthy (Running/Succeeded).
+type condition struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+// problemConditionTypes are conditions worth surfacing even when phase alone
+// looks healthy — every one of these means something is actually wrong.
+var problemConditionTypes = map[string]bool{
+	"SpecWarning":     true,
+	"SpecError":       true,
+	"MetricsError":    true,
+	"ArtifactGCError": true,
+}
+
+// firstProblemCondition returns the first true problem condition, or ok=false
+// if none. Name-sorted-equivalent: conditions is already a small ordered
+// slice from the API, so first-true is deterministic without extra sorting.
+func firstProblemCondition(conds []condition) (c condition, ok bool) {
+	for _, cond := range conds {
+		if problemConditionTypes[cond.Type] && cond.Status == "True" {
+			return cond, true
+		}
+	}
+	return condition{}, false
+}
+
 // workflowItem is the subset of a Workflow resource we parse out of
 // `kubectl get workflows.argoproj.io -o json`. The real CRD carries far more
 // (spec.templates, full node metadata, artifacts, ...) — we only pull what a
@@ -34,12 +64,15 @@ type workflowItem struct {
 		CreationTimestamp string `json:"creationTimestamp"`
 	} `json:"metadata"`
 	Status struct {
-		Phase      string                  `json:"phase"`
-		Message    string                  `json:"message"`
-		Progress   string                  `json:"progress"`
-		StartedAt  string                  `json:"startedAt"`
-		FinishedAt string                  `json:"finishedAt"`
-		Nodes      map[string]workflowNode `json:"nodes"`
+		Phase                    string                  `json:"phase"`
+		Message                  string                  `json:"message"`
+		Progress                 string                  `json:"progress"`
+		StartedAt                string                  `json:"startedAt"`
+		FinishedAt               string                  `json:"finishedAt"`
+		Nodes                    map[string]workflowNode `json:"nodes"`
+		CompressedNodes          string                  `json:"compressedNodes"`
+		OffloadNodeStatusVersion string                  `json:"offloadNodeStatusVersion"`
+		Conditions               []condition             `json:"conditions"`
 	} `json:"status"`
 }
 
@@ -132,18 +165,26 @@ func GetWorkflow(namespace, name string) (string, error) {
 	if item.Status.Message != "" {
 		fmt.Fprintf(&sb, "message: %s\n", item.Status.Message)
 	}
-	if len(item.Status.Nodes) == 0 {
+	if cond, ok := firstProblemCondition(item.Status.Conditions); ok {
+		fmt.Fprintf(&sb, "condition %s: %s\n", cond.Type, cond.Message)
+	}
+	nodes, degraded := resolveNodes(item)
+	if degraded != "" {
+		sb.WriteString(Degraded(degraded) + "\n")
+		return Redact(sb.String()), nil
+	}
+	if len(nodes) == 0 {
 		sb.WriteString("(no node status yet)\n")
 		return Redact(sb.String()), nil
 	}
 	sb.WriteString("nodes:\n")
-	nodeNames := make([]string, 0, len(item.Status.Nodes))
-	for id := range item.Status.Nodes {
+	nodeNames := make([]string, 0, len(nodes))
+	for id := range nodes {
 		nodeNames = append(nodeNames, id)
 	}
 	sort.Strings(nodeNames)
 	for _, id := range nodeNames {
-		n := item.Status.Nodes[id]
+		n := nodes[id]
 		line := fmt.Sprintf("  [%s] %s (template=%s) phase=%s", n.Type, orUnknown(n.DisplayName), orUnknown(n.TemplateName), orUnknown(n.Phase))
 		if n.Message != "" {
 			line += " — " + n.Message
@@ -186,10 +227,12 @@ func WorkflowLogs(namespace, name string, tail int) (string, error) {
 	return Redact(string(out)), nil
 }
 
-// Diagnose is a one-shot, read-only overview: every non-Succeeded workflow in
-// the namespace plus, for each, the first failed/errored node — the fastest
-// "what broke and where" starting point. Deterministic (no LLM); the caller
-// reasons over it.
+// Diagnose is a one-shot, read-only overview: every non-Succeeded workflow,
+// PLUS any Succeeded/Running one flagged by a problem condition
+// (SpecWarning/SpecError/MetricsError/ArtifactGCError — phase alone can look
+// healthy while one of these is true), plus for each Failed/Error workflow
+// the first failed/errored node — the fastest "what broke and where" starting
+// point. Deterministic (no LLM); the caller reasons over it.
 func Diagnose(namespace string) (string, error) {
 	if err := ValidateNamespace(namespace); err != nil {
 		return "", err
@@ -201,30 +244,42 @@ func Diagnose(namespace string) (string, error) {
 	var sb strings.Builder
 	unhealthy := 0
 	for _, it := range items {
-		if it.Status.Phase == "Succeeded" || it.Status.Phase == "" {
+		cond, hasProblem := firstProblemCondition(it.Status.Conditions)
+		phaseHealthy := it.Status.Phase == "Succeeded" || it.Status.Phase == ""
+		if phaseHealthy && !hasProblem {
 			continue
 		}
 		unhealthy++
-		fmt.Fprintf(&sb, "== %s == phase=%s", it.Metadata.Name, it.Status.Phase)
+		fmt.Fprintf(&sb, "== %s == phase=%s", it.Metadata.Name, orUnknown(it.Status.Phase))
 		if it.Status.Message != "" {
 			fmt.Fprintf(&sb, " — %s", it.Status.Message)
 		}
 		sb.WriteString("\n")
+		if hasProblem {
+			fmt.Fprintf(&sb, "  condition %s: %s\n", cond.Type, cond.Message)
+		}
 		if it.Status.Phase == "Failed" || it.Status.Phase == "Error" {
-			if node := firstFailedNode(it.Status.Nodes); node != nil {
-				fmt.Fprintf(&sb, "  first failed step: %s (template=%s) — %s\n",
-					orUnknown(node.DisplayName), orUnknown(node.TemplateName), node.Message)
-			} else {
-				// The workflow itself reports Failed/Error, but nothing in
-				// status.nodes corroborates it — status.nodes may be stale,
-				// truncated, or not yet populated. Don't imply we identified a
-				// culprit step when we didn't.
-				fmt.Fprintf(&sb, "  %s\n", Degraded("workflow reports "+it.Status.Phase+" but no matching Failed/Error node was found in status.nodes"))
+			nodes, degraded := resolveNodes(&it)
+			switch {
+			case degraded != "":
+				fmt.Fprintf(&sb, "  %s\n", Degraded(degraded))
+			case len(nodes) == 0:
+				fmt.Fprintf(&sb, "  %s\n", Degraded("workflow reports "+it.Status.Phase+" but has no node status at all"))
+			default:
+				if node := firstFailedNode(nodes); node != nil {
+					fmt.Fprintf(&sb, "  first failed step: %s (template=%s) — %s\n",
+						orUnknown(node.DisplayName), orUnknown(node.TemplateName), node.Message)
+				} else {
+					// The workflow itself reports Failed/Error, but nothing in
+					// the resolved nodes corroborates it. Don't imply we
+					// identified a culprit step when we didn't.
+					fmt.Fprintf(&sb, "  %s\n", Degraded("workflow reports "+it.Status.Phase+" but no matching Failed/Error node was found in status.nodes"))
+				}
 			}
 		}
 	}
 	if unhealthy == 0 {
-		return fmt.Sprintf("no Pending/Running/Failed/Error workflows in namespace %s", namespace), nil
+		return fmt.Sprintf("no Pending/Running/Failed/Error workflows or problem conditions in namespace %s", namespace), nil
 	}
 	return Redact(sb.String()), nil
 }

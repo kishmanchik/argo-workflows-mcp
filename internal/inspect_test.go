@@ -91,6 +91,60 @@ func TestGetWorkflow_ReportsFailedNode(t *testing.T) {
 	}
 }
 
+func TestGetWorkflow_DecompressesCompressedNodes(t *testing.T) {
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		item := mkItem("wf-big", "Failed", "9/10", "2026-07-10T00:00:00Z")
+		item.Status.CompressedNodes = gzipCompressNodes(t, map[string]workflowNode{
+			"n1": {DisplayName: "generate-pipeline-config", TemplateName: "generate-pipeline-config", Phase: "Succeeded"},
+			"n2": {DisplayName: "processing", TemplateName: "processing", Phase: "Failed", Message: "boom"},
+		})
+		b, _ := json.Marshal(item)
+		return b, nil
+	})
+	out, err := GetWorkflow("dev1", "wf-big")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "generate-pipeline-config") || !strings.Contains(out, "boom") {
+		t.Errorf("expected decompressed node detail in output, got: %q", out)
+	}
+}
+
+func TestGetWorkflow_OffloadedNodesAreDegradedNotEmpty(t *testing.T) {
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		item := mkItem("wf-offloaded", "Running", "3/10", "2026-07-10T00:00:00Z")
+		item.Status.OffloadNodeStatusVersion = "1"
+		b, _ := json.Marshal(item)
+		return b, nil
+	})
+	out, err := GetWorkflow("dev1", "wf-offloaded")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, DegradedPrefix) || !strings.Contains(out, "offloaded") {
+		t.Errorf("expected an explicit offload-degraded message, not a plain empty result, got: %q", out)
+	}
+	if strings.Contains(out, "no node status yet") {
+		t.Errorf("offloaded nodes must not be confused with 'hasn't started yet', got: %q", out)
+	}
+}
+
+func TestGetWorkflow_SurfacesProblemCondition(t *testing.T) {
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		item := mkItem("wf-warn", "Running", "1/3", "2026-07-10T00:00:00Z")
+		item.Status.Conditions = []condition{{Type: "SpecWarning", Status: "True", Message: "deprecated field used"}}
+		b, _ := json.Marshal(item)
+		return b, nil
+	})
+	out, err := GetWorkflow("dev1", "wf-warn")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "SpecWarning") || !strings.Contains(out, "deprecated field used") {
+		t.Errorf("expected the SpecWarning condition surfaced, got: %q", out)
+	}
+}
+
 func TestGetWorkflow_RejectsInvalidName(t *testing.T) {
 	if _, err := GetWorkflow("dev1", "--terminate"); err == nil {
 		t.Fatal("expected error for invalid workflow name, got nil")
@@ -173,6 +227,42 @@ func TestDiagnose_SkipsSucceededOnlySurfacesUnhealthy(t *testing.T) {
 	}
 	if !strings.Contains(out, "wf-broken") || !strings.Contains(out, "step-one") {
 		t.Errorf("expected broken workflow + failed step detail, got: %q", out)
+	}
+}
+
+func TestDiagnose_SucceededWithProblemConditionIsSurfaced(t *testing.T) {
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		items := []workflowItem{
+			mkItem("wf-clean", "Succeeded", "3/3", "2026-07-01T00:00:00Z"),
+			mkItem("wf-warned", "Succeeded", "3/3", "2026-07-02T00:00:00Z"),
+		}
+		items[1].Status.Conditions = []condition{{Type: "ArtifactGCError", Status: "True", Message: "gc failed"}}
+		return canned(items), nil
+	})
+	out, err := Diagnose("dev1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "wf-clean") {
+		t.Errorf("expected a genuinely clean Succeeded workflow to be excluded, got: %q", out)
+	}
+	if !strings.Contains(out, "wf-warned") || !strings.Contains(out, "ArtifactGCError") || !strings.Contains(out, "gc failed") {
+		t.Errorf("expected the Succeeded-but-flagged workflow surfaced with its condition, got: %q", out)
+	}
+}
+
+func TestDiagnose_FalseConditionDoesNotSurface(t *testing.T) {
+	withKubectl(t, func(args ...string) ([]byte, error) {
+		items := []workflowItem{mkItem("wf-clean", "Succeeded", "3/3", "2026-07-01T00:00:00Z")}
+		items[0].Status.Conditions = []condition{{Type: "SpecWarning", Status: "False", Message: "n/a"}}
+		return canned(items), nil
+	})
+	out, err := Diagnose("dev1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "wf-clean") {
+		t.Errorf("expected a False condition to NOT surface a Succeeded workflow, got: %q", out)
 	}
 }
 

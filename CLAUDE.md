@@ -44,6 +44,13 @@ would break the enforcement, stop and reconsider the change, don't delete the te
    `key=value` output formatting into the redaction (found via live-testing against a real
    cluster). Enforced by `TestRedact_KeyValueNotGlobbedIntoBlob` in `internal/redact_test.go`.
    Do not add `=` back into the interior character class.
+10. **Empty `status.nodes` is never read as "hasn't started" without checking why.** It can mean
+    genuinely no nodes yet, `status.compressedNodes` needs decoding, or
+    `status.offloadNodeStatusVersion` means the data is in an external DB this tool can't reach —
+    each must be distinguished, never collapsed into the same message. Enforced by
+    `internal/nodes_test.go` (`TestResolveNodes_*`) and
+    `TestGetWorkflow_OffloadedNodesAreDegradedNotEmpty` in `internal/inspect_test.go`. Always go
+    through `resolveNodes()` — never read `item.Status.Nodes` directly.
 
 ## Design context
 

@@ -74,20 +74,72 @@ workflow/node names. Two contributing causes, both fixed:
 Tested by `TestRedact_KeyValueNotGlobbedIntoBlob`, `TestRedact_RealisticArgoNodeNamesSurvive`,
 and `TestRedact_TrailingPaddingOnlyStillCaught` (a real base64 secret is still redacted).
 
+## Correctness fixes from reading the real Argo Workflows source
+
+After live-testing surfaced the redaction bug above, the actual `argoproj/argo-workflows` Go
+source (not just observed live behavior) was read to check this tool's assumptions against
+ground truth. Two real gaps found and fixed, both in `internal/nodes.go`:
+
+- **`status.compressedNodes`.** When a workflow has many nodes, Argo's controller gzip+base64
+  packs them into `status.compressedNodes` and leaves `status.nodes` empty (mirrors the
+  controller's own `workflow/packer.DecompressWorkflow`: `base64.StdEncoding` then `gzip`).
+  Without decoding this, `get_workflow`/`diagnose` would show "(no node status yet)" for a
+  workflow that actually has full node data — misleading. `resolveNodes()` now decompresses it
+  transparently. Only gzip (the default) is supported; a workflow using a non-default
+  `WORKFLOW_COMPRESSION_ALGORITHM` (zstd/brotli) surfaces as an explicit degraded reason rather
+  than silently showing nothing or pulling in extra non-stdlib dependencies for a rare case.
+- **`status.offloadNodeStatusVersion`.** When node-status offload to an external DB is enabled,
+  neither `nodes` nor `compressedNodes` carries the data at all — genuinely unreachable via
+  kubectl. `resolveNodes()` reports this explicitly ("node status is offloaded to an external
+  database... not visible via kubectl") instead of the same misleading "hasn't started yet".
+
+Also added: `status.conditions` (`SpecWarning`/`SpecError`/`MetricsError`/`ArtifactGCError`) can
+be true on a workflow whose `phase` alone looks healthy (`Succeeded`/`Running`). `get_workflow`
+now surfaces any true problem condition, and `diagnose`'s definition of "unhealthy" now includes
+a phase-healthy workflow flagged by one — a workflow that looks fine by phase but isn't. Tested
+by `TestGetWorkflow_DecompressesCompressedNodes`, `TestGetWorkflow_OffloadedNodesAreDegradedNotEmpty`,
+`TestDiagnose_SucceededWithProblemConditionIsSurfaced`, and `internal/nodes_test.go` generally.
+
+Confirmed as **not** a gap: the real `argo-server`'s own live-log endpoint
+(`server/workflow/workflow_server.go`) uses the exact same `workflows.argoproj.io/workflow`
+label selector this tool already does, and has no archive fallback either — that only exists in
+the UI layer via S3/artifact-repo credentials this tool deliberately doesn't manage. The
+existing "degraded: pods may be GC'd" message for empty logs is accurate, not a corner cut.
+
+## Minimal RBAC for a read-only ServiceAccount
+
+Sourced from Argo's own `docs/security.md` (the `ui-user-read-only` Role) and the aggregated
+`argo-aggregate-to-view` ClusterRole manifest — combine both for exactly what this tool needs:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-workflows-mcp-readonly
+  namespace: <namespace workflows run in>
+rules:
+- apiGroups: ["argoproj.io"]
+  resources: ["workflows", "workflows/finalizers"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+```
+
 ## Tool catalog (closed allowlist — 4 tools, all read-only)
 
 | Tool | kubectl verb | Purpose |
 |---|---|---|
 | `list_workflows` | `get` | Namespace-scoped list, optional phase filter |
-| `get_workflow` | `get` | Full status for one workflow, including a per-node (step) breakdown |
+| `get_workflow` | `get` | Full status for one workflow, including a per-node (step) breakdown, decompressed transparently, plus any true problem condition |
 | `workflow_logs` | `logs` | Tails every pod for one workflow, selected by Argo's own `workflows.argoproj.io/workflow` label — never a free-form pod name |
-| `diagnose` | `get` | One-shot aggregator: every non-Succeeded workflow + first failed step per Failed/Error one |
+| `diagnose` | `get` | One-shot aggregator: every non-Succeeded workflow, plus any phase-healthy one flagged by a problem condition, plus first failed step per Failed/Error one |
 
 ## Build / test / run
 
 ```bash
 go build ./...
-go test ./...            # 38 tests: validate, redact, errors, status, audit, inspect, handlers, tool catalog
+go test ./...            # 47 tests: validate, redact, errors, status, audit, nodes, inspect, handlers, tool catalog
 go build -o argo-workflows-mcp .
 ```
 
